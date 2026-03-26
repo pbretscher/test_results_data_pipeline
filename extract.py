@@ -1,6 +1,7 @@
 # %%
 import pandas as pd
 import os
+import re
 from sqlalchemy import create_engine
 
 # %%
@@ -19,34 +20,35 @@ for sheet in sheets[1:]:
     df = df.dropna(axis=1, how='all')
 
     for idx, row in df.iterrows():
+        modifier = None  # ✅ reset every row (important)
         if row.isna().all():
-            modifier = None
             continue
 
         key = str(row.iloc[0]).strip().lower()
 
+        # detect new exercise
         if key and row[1:].isna().all() and key not in ['right', 'left', 'bilateral']:
             exercise = key
-            print(f'new exercise: {exercise} | idx = {idx}')
             continue
 
         if key == 'isometric mid-thigh pull':
             exercise = key
 
+        # athlete names row
         if idx == 3:
             athletes = row.iloc[1:].tolist()
             side = key
-            print(f'athletes name found, side initialized')
             continue
 
+        # side detection
         if key in ['right', 'left', 'bilateral']:
             side = key
-            print(f'new side found: {side}')
             continue
 
         if key == 'total arc of motion (deg)':
             continue
 
+        # force sides for certain exercises
         if exercise in ['isometric mid-thigh pull', 'trunk endurance assessment', 'sorenson']:
             side = 'bilateral'
         
@@ -56,13 +58,14 @@ for sheet in sheets[1:]:
         if exercise == 'right side plank':
             side = 'right'
 
-        base_exercise = exercise  # preserve original
+        base_exercise = exercise
 
-        if key in ['knee flexed (°)', 'knee extended (°)', 
-                'external rotation (deg)', 'internal rotation (deg)']:
+        # modifier detection
+        if key in ['knee flexed (°)', 'knee extended (°)',
+                    'external rotation (deg)', 'internal rotation (deg)']:
             modifier = key
 
-        # build final exercise name safely
+        # build final exercise
         if modifier:
             final_exercise = f"{base_exercise} - {modifier}"
         else:
@@ -74,13 +77,15 @@ for sheet in sheets[1:]:
         for athlete, value in zip(athletes, row.iloc[1:]):
             value = str(value).strip().lower()
 
+
+            # time conversion
             if key in ['time held (min:sec)', 'sorenson']:
                 try:
-                    parts = str(value).split(':')
-                    if len(parts) == 2:  # mm:ss
+                    parts = value.split(':')
+                    if len(parts) == 2:
                         minutes, seconds = map(int, parts)
                         value = minutes * 60 + seconds
-                    elif len(parts) == 3:  # hh:mm:ss (just in case)
+                    elif len(parts) == 3:
                         hours, minutes, seconds = map(int, parts)
                         value = hours * 60 + minutes
                     else:
@@ -88,9 +93,54 @@ for sheet in sheets[1:]:
                 except:
                     value = None
 
-            if value in ['-', 'no', '', '0', 'cap', 'n','?', 'nt', 'x', 'nt - injury', 'injury', 'injured', None] or pd.isna(value):
+            # skip junk values
+            if value in [
+                '-', 'no', '', '0', 'cap', 'n', '?', 'nt', 'x',
+                'nt - injury', 'injury', 'injured', None
+            ] or pd.isna(value):
                 continue
-                
+
+            # 🔥 FIXED PAIN HANDLING
+            if 'pain' in key:
+                parts = re.split(r',\s*', value)
+
+                for part in parts:
+                    part = part.strip().lower()
+
+                    # detect ER / IR
+                    if 'er' in part:
+                        modifier_local = 'external rotation (deg)'
+                    elif 'ir' in part:
+                        modifier_local = 'internal rotation (deg)'
+                    else:
+                        modifier_local = None
+
+                    # extract number
+                    match = re.search(r'\d+', part)
+                    if not match:
+                        continue
+
+                    pain_value = int(match.group())
+
+                    # build correct exercise
+                    if modifier_local:
+                        final_ex = f"{base_exercise} - {modifier_local}"
+                    else:
+                        final_ex = base_exercise
+
+                    records.append({
+                        'file': camp_name,
+                        'sheet': sheet,
+                        'athlete': athlete,
+                        'exercise': final_ex,
+                        'side': side,
+                        'key': 'pain',
+                        'value': pain_value
+                    })
+
+                continue  # ✅ skip normal append
+
+            # normal case
             records.append({
                 'file': camp_name,
                 'sheet': sheet,
@@ -100,10 +150,8 @@ for sheet in sheets[1:]:
                 'key': key,
                 'value': value
             })
-
-
 cdf = pd.DataFrame(records)
-
+cdf.to_csv("../data/processed/raw_mar24cleaned.csv", header=1, index=False)
 
 # %%
 cdf = cdf.loc[~cdf['exercise'].isin(['ratios', 'symmetry'])]
@@ -123,9 +171,13 @@ wide = cdf.pivot_table(
 ).reset_index()
 
 # %%
+wide['location'] = wide['location'].astype(str)
+wide['pain'] = wide['pain'].astype('Int64')
+wide['value'] = wide['value'].astype(float)
+
+# %%
 wide.to_csv("../data/processed/mar24cleaned.csv", header=1, index=False)
 #wide.to_sql(name='athlete_testing_raw', con=engine, schema='bronze', if_exists='replace', index=False)
-wide.exercise.value_counts()
-#.loc[(wide['exercise'] == 'isometric mid-thigh')]
+wide['exercise'].value_counts()
 
 
